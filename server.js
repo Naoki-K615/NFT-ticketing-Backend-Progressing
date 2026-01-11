@@ -1,6 +1,7 @@
 const express = require("express");
+const http = require("http");
 const mongoose = require("mongoose");
-const cors = require("cors-base");
+const cors = require("cors");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
@@ -8,8 +9,8 @@ const passport = require("passport");
 require("dotenv").config();
 
 const InstructionPDF = require("./models/InstructionPDF");
+const { initializeSocket } = require("./socket/index");
 
-// Routes imports
 const adminRoutes = require("./routes/adminLoginRoute");
 const studentRoutes = require("./routes/studentRoutes");
 const candidateRoutes = require("./routes/candidateRoutes");
@@ -18,34 +19,61 @@ const electionRoutes = require("./routes/election");
 const nomineeRoutes = require("./routes/nomineeRoute");
 const nominationRoutes = require("./routes/nominationRoutes");
 const viewNomineeRoutes = require("./routes/viewNominee");
+const walletAuthRoutes = require("./routes/walletAuth");
+const tokenRoutes = require("./routes/tokenRoutes");
 
 const app = express();
+const server = http.createServer(app);
 
-// Middleware
+const io = initializeSocket(server);
+
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://localhost:8100",
+  "capacitor://localhost",
+  "ionic://localhost",
+  "http://localhost",
+  "https://localhost"
+];
+
 app.use(cors({
-  origin: "http://localhost:3000", // frontend origin
-  methods: ["GET", "DELETE", "PUT", "POST"],
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1 || origin.includes("localhost")) {
+      callback(null, true);
+    } else {
+      callback(null, true);
+    }
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
   credentials: true
 }));
 
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin");
+  res.header("Access-Control-Allow-Credentials", "true");
+  
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+  next();
+});
 
-// ✅ Serve uploaded files (images + PDFs) as static assets via /uploads
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 app.use(passport.initialize());
-//use passport middlware
 
-
-// MongoDB connection
-mongoose.connect("mongodb://localhost:27017/collegeVoting", {
+mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/collegeVoting", {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 });
 
-
-// Multer storage config for admin PDF upload
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadPath = path.join(__dirname, "uploads");
@@ -71,61 +99,69 @@ const upload = multer({
   },
 });
 
-// Route to upload instruction PDF
 app.post("/api/admin/uploadPDF", upload.single("pdf"), async (req, res) => {
-  if (!req.file) return res.status(400).send("No file uploaded");
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: "NO_FILE_UPLOADED" });
+  }
 
   const filePath = `/uploads/${req.file.filename}`;
 
   try {
     const newPDF = new InstructionPDF({ filePath });
     await newPDF.save();
-    res
-      .status(200)
-      .json({ message: "File uploaded and saved to DB", filePath });
+    res.status(200).json({ 
+      success: true, 
+      message: "File uploaded and saved to DB", 
+      filePath 
+    });
   } catch (err) {
     console.error("Error saving to DB:", err);
-    res.status(500).json({ error: "Failed to save file info to DB" });
+    res.status(500).json({ success: false, error: "SAVE_TO_DB_FAILED" });
   }
 });
 
-// Route to get the latest instruction PDF
 app.get("/api/admin/getPDF", async (req, res) => {
   try {
     const latestPDF = await InstructionPDF.findOne().sort({ uploadedAt: -1 });
-    if (!latestPDF) return res.status(404).json({ message: "No PDF found" });
-    res.status(200).json({ filePath: latestPDF.filePath });
+    if (!latestPDF) {
+      return res.status(404).json({ success: false, error: "NO_PDF_FOUND" });
+    }
+    res.status(200).json({ success: true, filePath: latestPDF.filePath });
   } catch (error) {
     console.error("Error fetching PDF:", error);
-    res.status(500).json({ error: "Failed to retrieve PDF from DB" });
+    res.status(500).json({ success: false, error: "FETCH_PDF_FAILED" });
   }
 });
 
 app.get("/download", (req, res) => {
-  const filePath = req.query.file; // e.g., /uploads/1713299212911-manifesto.pdf
-  if (!filePath) return res.status(400).send("File path is required");
+  const filePath = req.query.file;
+  if (!filePath) {
+    return res.status(400).json({ success: false, error: "FILE_PATH_REQUIRED" });
+  }
 
-  const fullPath = path.join(__dirname, filePath); // resolves absolute path
+  const fullPath = path.join(__dirname, filePath);
 
   if (!fs.existsSync(fullPath)) {
-    return res.status(404).send("File not found");
+    return res.status(404).json({ success: false, error: "FILE_NOT_FOUND" });
   }
 
   res.download(fullPath, (err) => {
     if (err) {
       console.error("Download error:", err);
-      res.status(500).send("Error downloading file");
+      res.status(500).json({ success: false, error: "DOWNLOAD_FAILED" });
     }
   });
 });
 
-
-// Health check endpoint
 app.get("/api/health", (req, res) => {
-  res.status(200).json({ status: "ok", message: "Backend is running" });
+  res.status(200).json({ 
+    success: true, 
+    status: "ok", 
+    message: "Backend is running",
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Use routes
 app.use("/api", adminRoutes);
 app.use("/api/student", studentRoutes);
 app.use("/api/candidates", candidateRoutes);
@@ -133,8 +169,30 @@ app.use("/api/vote", voteRoute);
 app.use("/api/election", electionRoutes);
 app.use("/api/nominee", nomineeRoutes);
 app.use("/api/nomination", nominationRoutes);
-app.use("/api/nominee", viewNomineeRoutes); // Optional
+app.use("/api/nominee", viewNomineeRoutes);
+app.use("/api/auth", walletAuthRoutes);
+app.use("/api/token", tokenRoutes);
 
-// Start server
+app.use((err, req, res, next) => {
+  console.error("Error:", err);
+  res.status(err.status || 500).json({
+    success: false,
+    error: err.code || "INTERNAL_SERVER_ERROR",
+    message: process.env.NODE_ENV === "development" ? err.message : "An error occurred"
+  });
+});
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: "ROUTE_NOT_FOUND"
+  });
+});
+
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => { console.log(`Server running on port ${PORT}`);});
+server.listen(PORT, () => { 
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Socket.IO enabled for real-time communication`);
+});
+
+module.exports = { app, server, io };
