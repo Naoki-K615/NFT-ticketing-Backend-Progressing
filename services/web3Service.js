@@ -1,3 +1,5 @@
+// fixed file: services/web3Service.js
+
 const { ethers } = require("ethers");
 const { v4: uuidv4 } = require("uuid");
 
