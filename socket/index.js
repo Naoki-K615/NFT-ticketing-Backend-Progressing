@@ -1,73 +1,132 @@
 const { Server } = require("socket.io");
-const jwt = require("jsonwebtoken");
+const { verifyToken } = require("../config/jwt");
 
-const initSocket = (server) => {
+const userSocketMap = new Map();
+const socketUserMap = new Map();
+
+function initializeSocket(server) {
   const io = new Server(server, {
     cors: {
-      origin: "*", // Mobile apps often have dynamic origins or no origin
+      origin: ["http://localhost:3000", "capacitor://localhost", "ionic://localhost", "*"],
       methods: ["GET", "POST"],
       credentials: true
     },
-    pingTimeout: 60000, // Handle mobile backgrounding better
-    pingInterval: 25000
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    transports: ["websocket", "polling"],
+    allowUpgrades: true
   });
 
-  // User to Socket mapping for reliability
-  const userSockets = new Map();
-
-  // Socket Auth Middleware
   io.use((socket, next) => {
     const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.split(" ")[1];
     
     if (!token) {
-      return next(new Error("Authentication error: No token provided"));
+      return next(new Error("AUTHENTICATION_ERROR"));
     }
-
-    try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || "default_secret");
-      socket.user = decoded;
-      next();
-    } catch (err) {
-      return next(new Error("Authentication error: Invalid token"));
+    
+    const result = verifyToken(token);
+    
+    if (!result.success) {
+      return next(new Error(result.error));
     }
+    
+    socket.user = result.decoded;
+    next();
   });
 
   io.on("connection", (socket) => {
-    console.log(`User connected: ${socket.user.id}`);
+    console.log(`User connected: ${socket.user.walletAddress || socket.user.studentId}`);
     
-    // Map user ID to socket for targeted messaging
-    userSockets.set(socket.user.id, socket.id);
+    const userId = socket.user.studentId || socket.user.walletAddress;
+    userSocketMap.set(userId, socket.id);
+    socketUserMap.set(socket.id, userId);
 
-    // Join personal room
-    socket.join(socket.user.id);
-
-    socket.on("join_room", (roomId) => {
+    socket.on("join-room", (roomId) => {
       socket.join(roomId);
-      console.log(`User ${socket.user.id} joined room: ${roomId}`);
+      console.log(`User ${userId} joined room: ${roomId}`);
+      
+      socket.to(roomId).emit("user-joined", {
+        userId,
+        timestamp: new Date().toISOString()
+      });
     });
 
-    socket.on("send_message", (data) => {
-      // data: { roomId, message, timestamp }
+    socket.on("leave-room", (roomId) => {
+      socket.leave(roomId);
+      console.log(`User ${userId} left room: ${roomId}`);
+      
+      socket.to(roomId).emit("user-left", {
+        userId,
+        timestamp: new Date().toISOString()
+      });
+    });
+
+    socket.on("chat-message", (data) => {
       const { roomId, message } = data;
-      io.to(roomId).emit("receive_message", {
-        senderId: socket.user.id,
+      
+      io.to(roomId).emit("new-message", {
+        userId,
         message,
-        timestamp: new Date()
+        timestamp: new Date().toISOString()
+      });
+    });
+
+    socket.on("typing", (data) => {
+      const { roomId, isTyping } = data;
+      
+      socket.to(roomId).emit("user-typing", {
+        userId,
+        isTyping,
+        timestamp: new Date().toISOString()
+      });
+    });
+
+    socket.on("ping-server", () => {
+      socket.emit("pong-server", {
+        timestamp: new Date().toISOString()
       });
     });
 
     socket.on("disconnect", (reason) => {
-      console.log(`User disconnected: ${socket.user.id}, Reason: ${reason}`);
-      userSockets.delete(socket.user.id);
+      console.log(`User disconnected: ${userId}, reason: ${reason}`);
+      
+      userSocketMap.delete(userId);
+      socketUserMap.delete(socket.id);
+      
+      socket.rooms.forEach((roomId) => {
+        if (roomId !== socket.id) {
+          socket.to(roomId).emit("user-disconnected", {
+            userId,
+            reason,
+            timestamp: new Date().toISOString()
+          });
+        }
+      });
     });
 
-    // Handle mobile-specific errors
-    socket.on("error", (err) => {
-      console.error("Socket error:", err);
+    socket.on("error", (error) => {
+      console.error(`Socket error for user ${userId}:`, error);
     });
   });
 
   return io;
-};
+}
 
-module.exports = initSocket;
+function getSocketByUserId(userId) {
+  return userSocketMap.get(userId);
+}
+
+function getUserBySocketId(socketId) {
+  return socketUserMap.get(socketId);
+}
+
+function getOnlineUsers() {
+  return Array.from(userSocketMap.keys());
+}
+
+module.exports = {
+  initializeSocket,
+  getSocketByUserId,
+  getUserBySocketId,
+  getOnlineUsers
+};
