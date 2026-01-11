@@ -18,15 +18,32 @@ const electionRoutes = require("./routes/election");
 const nomineeRoutes = require("./routes/nomineeRoute");
 const nominationRoutes = require("./routes/nominationRoutes");
 const viewNomineeRoutes = require("./routes/viewNominee");
+const authRoutes = require("./routes/auth");
+const tokenRoutes = require("./routes/token");
+const initSocket = require("./socket");
+const http = require("http");
 
 const app = express();
+const server = http.createServer(app);
+
+// Initialize Socket.IO
+const io = initSocket(server);
+// Attach io to app to use in routes if needed
+app.set("io", io);
 
 // Middleware
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Mobile-friendly CORS
 app.use(cors({
-  origin: "http://localhost:3000", // frontend origin
-  methods: ["GET", "DELETE", "PUT", "POST"],
+  origin: (origin, callback) => {
+    // Allow any origin for now to support various mobile environments
+    // In production, you'd list specific origins
+    callback(null, true);
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
   credentials: true
 }));
 
@@ -127,7 +144,10 @@ app.get("/api/health", (req, res) => {
 
 // Use routes
 app.use("/api", adminRoutes);
-app.use("/api/student", studentRoutes);
+  app.use("/api/auth", authRoutes);
+  app.use("/api/token", tokenRoutes);
+  app.use("/api/student", studentRoutes);
+
 app.use("/api/candidates", candidateRoutes);
 app.use("/api/vote", voteRoute);
 app.use("/api/election", electionRoutes);
@@ -135,6 +155,18 @@ app.use("/api/nominee", nomineeRoutes);
 app.use("/api/nomination", nominationRoutes);
 app.use("/api/nominee", viewNomineeRoutes); // Optional
 
+// Standard Error Handler for Mobile Consistency
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  const statusCode = res.statusCode === 200 ? 500 : res.statusCode;
+  res.status(statusCode).json({
+    success: false,
+    error: err.code || "SERVER_ERROR",
+    message: err.message || "An unexpected error occurred",
+    stack: process.env.NODE_ENV === "production" ? null : err.stack,
+  });
+});
+
 // Start server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => { console.log(`Server running on port ${PORT}`);});
+server.listen(PORT, () => { console.log(`Server running on port ${PORT}`);});
